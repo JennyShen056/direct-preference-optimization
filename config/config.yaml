@@ -1,3 +1,4 @@
+############config.yaml#############
 # random seed for batch sampling
 seed: 0
 
@@ -6,6 +7,8 @@ exp_name: ???
 
 # the batch size for training; for FSDP, the batch size per GPU is batch_size / (grad_accumulation_steps * num_gpus)
 batch_size: 4
+
+# num_heads: 3  # Number of preference dimensions
 
 # the batch size during evaluation and sampling, if enabled
 eval_batch_size: 16
@@ -18,7 +21,7 @@ fsdp_port: null
 
 # which dataset(s) to train on; can pass a list like datasets=[hh,shp]
 datasets:
-- hh
+  - hh
 
 # wandb configuration
 wandb:
@@ -71,7 +74,8 @@ n_epochs: 1
 n_examples: null
 
 # the number of examples to evaluate on (and sample from, if sample_during_eval is true)
-n_eval_examples: 256
+# n_eval_examples: 256
+n_eval_examples: 10
 
 # the trainer class to use (e.g. BasicTrainer, FSDPTrainer, TensorParallelTrainer)
 trainer: BasicTrainer
@@ -86,12 +90,12 @@ warmup_steps: 150
 activation_checkpointing: false
 
 # evaluate and save model every eval_every steps
-eval_every: 20_000
+eval_every: 5_000
 
 # prevent wandb from logging more than once per minimum_log_interval_secs
 minimum_log_interval_secs: 1.0
 
 defaults:
-- _self_
-- model: blank_model_fp32 # basic model configuration
-- loss: sft # which loss function, either sft or dpo (specify loss.beta if using dpo)
+  - _self_
+  - model: blank_model_fp32 # basic model configuration
+  - loss: sft # which loss function, either sft or dpo (specify loss.beta if using dpo)

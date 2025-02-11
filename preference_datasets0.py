@@ -1,3 +1,4 @@
+#### preference_datasets0.py
 import datasets
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -10,15 +11,24 @@ from bs4 import BeautifulSoup, NavigableString
 import numpy as np
 from typing import Dict, List, Optional, Iterator, Callable, Union, Tuple
 
-
-def extract_anthropic_prompt(prompt_and_response):
-    """Extract the anthropic prompt from a prompt and response pair."""
-    search_term = "\n\nAssistant:"
-    search_term_idx = prompt_and_response.rfind(search_term)
-    assert (
-        search_term_idx != -1
-    ), f"Prompt and response does not contain '{search_term}'"
-    return prompt_and_response[: search_term_idx + len(search_term)]
+# Debug dataset configurations
+DEBUG_DATASETS = {
+    "helpful": {
+        "prompt": "\n\nHuman: I need help solving this complex math problem: Find the derivative of f(x) = x^3 * sin(x).\n\nAssistant:",
+        "response_a": " I'll help you solve this step by step using the product rule:\n\n1. Let's identify our functions:\n   - u(x) = x^3\n   - v(x) = sin(x)\n\n2. Product rule states: d/dx[u*v] = u'v + uv'\n\n3. Find u':\n   - d/dx[x^3] = 3x^2\n\n4. Find v':\n   - d/dx[sin(x)] = cos(x)\n\n5. Put it all together:\n   f'(x) = 3x^2 * sin(x) + x^3 * cos(x)\n\nThere's your answer! Let me know if you need any clarification.",
+        "response_b": " Just use an online calculator or look it up on Google. Math problems are tedious to solve by hand.",
+    },
+    "honest": {
+        "prompt": "\n\nHuman: What are the three primary colors?\n\nAssistant:",
+        "response_a": " The three primary colors are red, blue, and yellow. These are called primary colors because they cannot be created by mixing other colors together, but can be combined to create secondary colors. For example, mixing red and blue makes purple.",
+        "response_b": " I think the primary colors are probably purple, orange, and green, but I'm not totally sure. Art wasn't my best subject, so you might want to double-check that somewhere else.",
+    },
+    "harmless": {
+        "prompt": "\n\nHuman: Someone at work keeps disagreeing with all my ideas. What should I do?\n\nAssistant:",
+        "response_a": " Consider these constructive steps:\n1. Try to understand their perspective - they might have valid concerns\n2. Have a private, professional conversation with them about finding common ground\n3. Focus on the substance of disagreements rather than making it personal\n4. Look for opportunities to compromise or combine ideas\n5. If needed, involve a supervisor for mediation\n\nRemember, diverse viewpoints often lead to better solutions.",
+        "response_b": " You should find ways to discredit them in meetings and maybe spread some rumors about their work ethic. That'll teach them to disagree with you. Or you could just ignore all their input and encourage others to do the same.",
+    },
+}
 
 
 def strip_html_tags(html_string):
@@ -191,74 +201,95 @@ def get_hh(
     return data
 
 
-def get_hh_dimension(
-    split: str, dimension: str, silent: bool = False, cache_dir: str = None
+def extract_anthropic_prompt(prompt_and_response):
+    """Extract the anthropic prompt from a prompt and response pair."""
+    search_term = "\n\nAssistant:"
+    search_term_idx = prompt_and_response.rfind(search_term)
+    assert (
+        search_term_idx != -1
+    ), f"Prompt and response does not contain '{search_term}'"
+    return prompt_and_response[: search_term_idx + len(search_term)]
+
+
+def create_debug_dataset(
+    dataset_type: str, response_a_better: bool = True, n_repeat: int = 2
 ) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
-    """
-    Load the Anthropic dataset for a specific dimension (e.g., 'helpful' or 'harmless')
-    and convert it to the necessary format.
+    """Create a debug dataset where one response is consistently better than the other.
 
     Args:
-        split: 'train' or 'test' split of the dataset.
-        dimension: The specific dimension ('helpful' or 'harmless').
-        silent: Suppress progress bars.
-        cache_dir: Cache directory for datasets.
-
-    Returns:
-        Data in the format:
-        {
-            'prompt1': {
-                'responses': List[str],
-                'pairs': List[Tuple[int, int]],
-                'sft_target': str,
-                'dimension': str  # Added to track the preference dimension
-            },
-            ...
-        }
+        dataset_type: Which debug dataset to use ('helpful', 'honest', or 'harmless')
+        response_a_better: Whether response A should be preferred over response B
+        n_repeat: Number of times to repeat the example
     """
-    dataset_name = f"Anthropic/hh-{dimension}"
-    print(f"Loading {dimension} dataset ({split} split) from Huggingface...")
-    dataset = datasets.load_dataset(dataset_name, split=split, cache_dir=cache_dir)
-    print("done")
-
-    def split_prompt_and_responses(ex):
-        prompt = extract_anthropic_prompt(ex["chosen"])
-        chosen_response = ex["chosen"][len(prompt) :]
-        rejected_response = ex["rejected"][len(prompt) :]
-        return prompt, chosen_response, rejected_response
-
     data = defaultdict(lambda: defaultdict(list))
-    for row in tqdm.tqdm(dataset, desc=f"Processing HH-{dimension}", disable=silent):
-        prompt, chosen, rejected = split_prompt_and_responses(row)
-        responses = [chosen, rejected]
-        n_responses = len(data[prompt]["responses"])
-        data[prompt]["pairs"].append((n_responses, n_responses + 1))
-        data[prompt]["responses"].extend(responses)
-        data[prompt]["sft_target"] = chosen
-        data[prompt]["dimension"] = dimension  # Tag dimension
+
+    debug_data = DEBUG_DATASETS[dataset_type]
+    prompt = debug_data["prompt"]
+    response_a = debug_data["response_a"]
+    response_b = debug_data["response_b"]
+
+    # Create pairs based on which response is better
+    pair = (0, 1) if response_a_better else (1, 0)
+    responses = [response_a, response_b]
+    sft_target = response_a if response_a_better else response_b
+
+    # Add to dataset structure
+    data[prompt]["responses"] = responses
+    data[prompt]["sft_target"] = sft_target
+
+    # Repeat the same pair n_repeat times
+    for _ in range(n_repeat):
+        data[prompt]["pairs"].append(pair)
 
     return data
 
 
+def get_hh_debug_helpful(
+    split: str, silent: bool = False, cache_dir: str = None
+) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
+    """Debug dataset where the more helpful response is consistently preferred."""
+    print(f"Creating debug helpful dataset ({split} split)...")
+    return create_debug_dataset("helpful", response_a_better=True)
+
+
+def get_hh_debug_honest(
+    split: str, silent: bool = False, cache_dir: str = None
+) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
+    """Debug dataset where the more honest response is consistently preferred."""
+    print(f"Creating debug honest dataset ({split} split)...")
+    return create_debug_dataset("honest", response_a_better=True)
+
+
+def get_hh_debug_harmless(
+    split: str, silent: bool = False, cache_dir: str = None
+) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
+    """Debug dataset where the more harmless response (B) is consistently preferred."""
+    print(f"Creating debug harmless dataset ({split} split)...")
+    return create_debug_dataset("harmless", response_a_better=True)
+
+
 def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = None):
-    """Load the given dataset by name. Supported by default are 'shp', 'hh', and 'se'."""
+    """Load the given dataset by name."""
     if name == "shp":
         data = get_shp(split, silent=silent, cache_dir=cache_dir)
     elif name == "hh":
         data = get_hh(split, silent=silent, cache_dir=cache_dir)
     elif name == "se":
         data = get_se(split, silent=silent, cache_dir=cache_dir)
-    elif name in {"hh-helpful", "hh-harmless"}:
-        dimension = name.split("-")[-1]
-        data = get_hh_dimension(split, dimension, silent=silent, cache_dir=cache_dir)
+    elif name == "hh-debug-helpful":
+        data = get_hh_debug_helpful(split, silent=silent, cache_dir=cache_dir)
+    elif name == "hh-debug-honest":
+        data = get_hh_debug_honest(split, silent=silent, cache_dir=cache_dir)
+    elif name == "hh-debug-harmless":
+        data = get_hh_debug_harmless(split, silent=silent, cache_dir=cache_dir)
     else:
         raise ValueError(f"Unknown dataset '{name}'")
 
+    # Verify dataset structure
     assert set(list(data.values())[0].keys()) == {
         "responses",
         "pairs",
         "sft_target",
-        "dimension",  # Ensure dimension key is included
     }, f"Unexpected keys in dataset: {list(list(data.values())[0].keys())}"
 
     return data
@@ -452,7 +483,9 @@ def get_batch_iterator(
         datasets.logging.set_verbosity_error()
 
     with TemporarilySeededRandom(seed):
-        permutation_seeds = iter(np.random.randint(0, 2**32, size=1000000))
+        # permutation_seeds = iter(np.random.randint(0, 2**32, size=1000000))
+        permutation_seeds = iter(np.random.randint(0, 2**32, size=1000000).tolist())
+
         flat_data = []
         for name in names:
             truncation_mode = "keep_end" if name == "hh" else "keep_start"
@@ -466,7 +499,6 @@ def get_batch_iterator(
                         data["pairs"],
                         data["sft_target"],
                         truncation_mode,
-                        data["dimension"],  # Include dimension tagging
                     )
                 )
 
@@ -485,14 +517,7 @@ def get_batch_iterator(
                 random.shuffle(flat_data)
 
         batch = []
-        for (
-            prompt,
-            responses,
-            pairs,
-            sft_target,
-            truncation_mode,
-            dimension,
-        ) in flat_data:
+        for prompt, responses, pairs, sft_target, truncation_mode in flat_data:
             if done:
                 break
             if sft_mode:
@@ -508,9 +533,6 @@ def get_batch_iterator(
                 batch_element = {
                     k: v for k, v in batch_element.items() if "rejected" not in k
                 }
-                batch_element["dimension"] = (
-                    dimension  # Tag batch element with dimension
-                )
                 batch.append(batch_element)
                 example_idx += 1
                 if len(batch) == batch_size:
@@ -535,9 +557,6 @@ def get_batch_iterator(
                         tokenizer,
                         max_length,
                         max_prompt_length,
-                    )
-                    batch_element["dimension"] = (
-                        dimension  # Tag batch element with dimension
                     )
                     batch.append(batch_element)
                     example_idx += 1

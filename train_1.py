@@ -1,3 +1,4 @@
+####### train_1.py #######
 import torch
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -14,13 +15,13 @@ import os
 import hydra
 import torch.multiprocessing as mp
 from omegaconf import OmegaConf, DictConfig
-import trainers
+import trainers_1
 import wandb
 import json
 import socket
-from typing import Optional, Set
+from typing import Optional, Set, List
 import resource
-
+from models_1 import MultiHeadPreferenceModel
 
 OmegaConf.register_new_resolver(
     "get_local_run_dir",
@@ -35,7 +36,7 @@ def worker_main(
     policy: nn.Module,
     reference_model: Optional[nn.Module] = None,
 ):
-    """Main function for each worker process (may be only 1 for BasicTrainer/TensorParallelTrainer)."""
+    """Main function for each worker process."""
     if "FSDP" in config.trainer:
         init_distributed(rank, world_size, port=config.fsdp_port)
 
@@ -53,7 +54,7 @@ def worker_main(
             name=config.exp_name,
         )
 
-    TrainerClass = getattr(trainers, config.trainer)
+    TrainerClass = getattr(trainers_1, config.trainer)
     print(f"Creating trainer on process {rank} with world size {world_size}")
     trainer = TrainerClass(
         policy,
@@ -69,11 +70,18 @@ def worker_main(
     trainer.save()
 
 
+def initialize_dimension_heads(
+    config: DictConfig, base_model: nn.Module, n_dims: int
+) -> nn.Module:
+    print(f"Initializing multi-head model with {n_dims} dimensions")
+    multi_head_model = MultiHeadPreferenceModel(base_model, n_dims)
+    return multi_head_model
+
+
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(config: DictConfig):
-    """Main entry point for training. Validates config, creates/initializes model(s), and kicks off worker process(es)."""
-
-    # Resolve hydra references, e.g. so we don't re-compute the run directory
+    """Main entry point for training."""
+    # Resolve hydra references
     OmegaConf.resolve(config)
 
     missing_keys: Set[str] = OmegaConf.missing_keys(config)
@@ -109,29 +117,51 @@ def main(config: DictConfig):
         {"device_map": "balanced"} if config.trainer == "BasicTrainer" else {}
     )
     policy_dtype = getattr(torch, config.model.policy_dtype)
-    policy = transformers.AutoModelForCausalLM.from_pretrained(
+
+    # Example snippet from train.py
+    is_multi_dim = isinstance(config.datasets, list) and (len(config.datasets) > 1)
+    n_dims = len(config.datasets) if is_multi_dim else 1
+
+    # Build the base model
+    base_policy = transformers.AutoModelForCausalLM.from_pretrained(
         config.model.name_or_path,
         cache_dir=get_local_dir(config.local_dirs),
         low_cpu_mem_usage=True,
-        torch_dtype=policy_dtype,
-        **model_kwargs,
+        torch_dtype=getattr(torch, config.model.policy_dtype),
+        **({"device_map": "balanced"} if config.trainer == "BasicTrainer" else {}),
     )
-    disable_dropout(policy)
+    disable_dropout(base_policy)
+
+    # Wrap the base model into your multi-head model if there is more than one dimension
+    if is_multi_dim:
+        print(f"Initializing multi-head model with {n_dims} dimensions")
+        # This function should wrap base_policy into an instance of MultiHeadPreferenceModel.
+        policy = initialize_dimension_heads(config, base_policy, n_dims)
+    else:
+        policy = base_policy
 
     if config.loss.name in {"dpo", "ipo"}:
         print("building reference model")
-        reference_model_dtype = getattr(torch, config.model.reference_dtype)
-        reference_model = transformers.AutoModelForCausalLM.from_pretrained(
+        base_reference_model = transformers.AutoModelForCausalLM.from_pretrained(
             config.model.name_or_path,
             cache_dir=get_local_dir(config.local_dirs),
             low_cpu_mem_usage=True,
-            torch_dtype=reference_model_dtype,
+            torch_dtype=getattr(torch, config.model.reference_dtype),
             **model_kwargs,
         )
-        disable_dropout(reference_model)
+        disable_dropout(base_reference_model)
+
+        # Initialize multi-head model for reference
+        if is_multi_dim:
+            reference_model = initialize_dimension_heads(
+                config, base_reference_model, n_dims
+            )
+        else:
+            reference_model = base_reference_model
     else:
         reference_model = None
 
+    # Load pre-trained weights if specified
     if config.model.archive is not None:
         state_dict = torch.load(config.model.archive, map_location="cpu")
         step, metrics = state_dict["step_idx"], state_dict["metrics"]
@@ -143,6 +173,7 @@ def main(config: DictConfig):
             reference_model.load_state_dict(state_dict["state"])
         print("loaded pre-trained weights")
 
+    # Launch training processes
     if "FSDP" in config.trainer:
         world_size = torch.cuda.device_count()
         print("starting", world_size, "processes for FSDP training")
